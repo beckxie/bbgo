@@ -35,8 +35,36 @@ func (s *BacktestService) SyncKLineByInterval(ctx context.Context, exchange type
 	// should use channel here
 	klineC, errC := batch.Query(ctx, symbol, interval, startTime, endTime)
 	// var previousKLine types.KLine
+	const bulkInsertSize = 5000
+	kLinesUnInsert := make([]types.KLine, 0, bulkInsertSize)
+	var sql string
 	for k := range klineC {
-		if err := s.Insert(k); err != nil {
+		if sql == "" {
+			sql = "INSERT INTO `binance_klines` (`exchange`, `start_time`, `end_time`, `symbol`, `interval`, `open`, `high`, `low`, `close`, `closed`, `volume`)" +
+				"VALUES (:exchange, :start_time, :end_time, :symbol, :interval, :open, :high, :low, :close, :closed, :volume)"
+			sql = strings.ReplaceAll(sql, "binance_klines", k.Exchange+"_klines")
+		}
+
+		if len(k.Exchange) == 0 {
+			return errors.New("kline.Exchange field should not be empty")
+		}
+
+		kLinesUnInsert = append(kLinesUnInsert, k)
+
+		if len(kLinesUnInsert) == bulkInsertSize {
+			log.Debugf("BulkInsert..")
+			if err := s.BulkInsert(sql, kLinesUnInsert); err != nil {
+				return err
+			}
+			// clear slice because there are inserted.
+			kLinesUnInsert = kLinesUnInsert[:0]
+		}
+	}
+
+	// insert last batch
+	if len(kLinesUnInsert) > 0 {
+		log.Debugf("last BulkInsert..")
+		if err := s.BulkInsert(sql, kLinesUnInsert); err != nil {
 			return err
 		}
 	}
@@ -200,15 +228,7 @@ func (s *BacktestService) scanRows(rows *sqlx.Rows) (klines []types.KLine, err e
 	return klines, rows.Err()
 }
 
-func (s *BacktestService) Insert(kline types.KLine) error {
-	if len(kline.Exchange) == 0 {
-		return errors.New("kline.Exchange field should not be empty")
-	}
-
-	sql := "INSERT INTO `binance_klines` (`exchange`, `start_time`, `end_time`, `symbol`, `interval`, `open`, `high`, `low`, `close`, `closed`, `volume`)" +
-		"VALUES (:exchange, :start_time, :end_time, :symbol, :interval, :open, :high, :low, :close, :closed, :volume)"
-	sql = strings.ReplaceAll(sql, "binance_klines", kline.Exchange+"_klines")
-
-	_, err := s.DB.NamedExec(sql, kline)
+func (s *BacktestService) BulkInsert(sql string, klines []types.KLine) error {
+	_, err := s.DB.NamedExec(sql, klines)
 	return err
 }
